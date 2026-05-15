@@ -15,14 +15,12 @@ Make sure the Nominatim container is running first:
     docker compose up
 """
 
-import csv
-import json
 import time
 import requests
 import pandas as pd
 from pathlib import Path
 from geopy.geocoders import Nominatim
-from geopy.exc import GeocoderTimedOut
+from geopy.exc import GeocoderTimedOut, GeocoderServiceError, GeocoderUnavailable
 
 # =============================================================================
 # Configuration
@@ -159,18 +157,36 @@ def test_batch_geocoding_from_csv():
     print(f"Input:  {CSV_FILE}")
     print(f"Output: {OUTPUT_FILE}\n")
 
-    # Point geopy at the local Nominatim server
+    # Configure geopy to use the local Nominatim server
     geolocator = Nominatim(
         user_agent="nominatim-test",
         domain="localhost:8088",
         scheme="http"
     )
 
-    df = pd.read_csv(CSV_FILE)
+    # Verify geopy is pointing at the correct server before batch run
+    print(f"  geopy API URL: {geolocator.api}")
+    try:
+        probe = geolocator.geocode("Boston City Hall, Boston, MA", timeout=10)
+        if probe:
+            print(f"  geopy probe:   OK → {probe.latitude}, {probe.longitude}")
+        else:
+            print("  geopy probe:   returned None — check server connectivity")
+            print("  Falling back to requests for batch geocoding.\n")
+            _batch_with_requests(pd.read_csv(CSV_FILE))
+            return
+    except Exception as e:
+        print(f"  geopy probe:   ERROR — {e}")
+        print("  Falling back to requests for batch geocoding.\n")
+        _batch_with_requests(pd.read_csv(CSV_FILE))
+        return
+
+    print()
+    # Read zip as string to preserve leading zeros (e.g. 02215 not 2215)
+    df = pd.read_csv(CSV_FILE, dtype={"zip": str})
     results = []
 
     for _, row in df.iterrows():
-        # Build a full address string from the CSV columns
         full_address = f"{row['address']}, {row['city']}, {row['state']} {row['zip']}"
 
         try:
@@ -178,7 +194,7 @@ def test_batch_geocoding_from_csv():
             if location:
                 lat = location.latitude
                 lon = location.longitude
-                display = location.raw.get("display_name", "")[:80]
+                display = location.raw.get("display_name", "")[:100]
                 status = "OK"
             else:
                 lat = lon = None
@@ -188,6 +204,10 @@ def test_batch_geocoding_from_csv():
             lat = lon = None
             display = ""
             status = "TIMEOUT"
+        except (GeocoderServiceError, GeocoderUnavailable) as e:
+            lat = lon = None
+            display = ""
+            status = f"ERROR: {e}"
 
         results.append({
             "id": row["id"],
@@ -206,10 +226,62 @@ def test_batch_geocoding_from_csv():
 
         time.sleep(REQUEST_DELAY)
 
-    # Write results to CSV
+    _write_results(results)
+
+
+def _batch_with_requests(df):
+    """Fallback batch geocoder using requests directly."""
+    results = []
+    # Ensure zip is string to preserve leading zeros
+    df = df.astype({"zip": str})
+    for _, row in df.iterrows():
+        full_address = f"{row['address']}, {row['city']}, {row['state']} {row['zip']}"
+        try:
+            response = requests.get(
+                f"{NOMINATIM_URL}/search",
+                params={"q": full_address, "format": "json", "limit": 1},
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data:
+                r = data[0]
+                lat, lon = float(r["lat"]), float(r["lon"])
+                display = r.get("display_name", "")[:100]
+                status = "OK"
+            else:
+                lat = lon = None
+                display = ""
+                status = "NOT FOUND"
+        except requests.exceptions.RequestException as e:
+            lat = lon = None
+            display = ""
+            status = f"ERROR: {e}"
+
+        results.append({
+            "id": row["id"],
+            "name": row["name"],
+            "input_address": full_address,
+            "status": status,
+            "latitude": lat,
+            "longitude": lon,
+            "matched_address": display,
+        })
+
+        icon = "✓" if status == "OK" else "✗"
+        print(f"  [{icon}] {row['name'][:40]:<40} {status}")
+        if lat:
+            print(f"       → {lat:.6f}, {lon:.6f}")
+
+        time.sleep(REQUEST_DELAY)
+
+    _write_results(results)
+
+
+def _write_results(results):
+    """Write geocoding results to CSV and print summary."""
     results_df = pd.DataFrame(results)
     results_df.to_csv(OUTPUT_FILE, index=False)
-
     found = sum(1 for r in results if r["status"] == "OK")
     print(f"\nSummary: {found}/{len(results)} addresses geocoded successfully")
     print(f"Results saved to: {OUTPUT_FILE}")
