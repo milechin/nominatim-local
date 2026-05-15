@@ -1,0 +1,113 @@
+# =============================================================================
+# Nominatim Docker Compose — Production Reference
+# =============================================================================
+#
+# BEFORE FIRST RUN:
+#   1. Create the data directory next to this file:
+#        mkdir -p data
+#
+#   2. Copy your .osm.pbf file into that folder:
+#        cp /path/to/massachusetts-latest.osm.pbf data/
+#      Download extracts from: https://download.geofabrik.de/
+#      (must be done while internet is available — before going air-gapped)
+#
+#   3. Set OSM_FILE below to match the filename you copied in.
+#
+#   4. Build and start:
+#        docker compose up --build
+#
+# SUBSEQUENT STARTS (data already imported):
+#   docker compose up
+#
+# AIR-GAPPED / ENCLAVE USE:
+#   Build the image while you have internet, then save it for transfer:
+#     docker compose build
+#     docker save nominatim-nominatim | gzip > nominatim-image.tar.gz
+#   On the enclave host:
+#     docker load < nominatim-image.tar.gz
+#     docker compose up   (skip --build since the image is already loaded)
+#
+# =============================================================================
+
+services:
+  nominatim:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: nominatim
+
+    # Run as the nominatim user (matches the Linux user created in the Dockerfile)
+    user: nominatim
+
+    # ── Entrypoint ────────────────────────────────────────────────────────────
+    # Replaces the Dockerfile's default CMD (tail -f /dev/null).
+    # Handles PostgreSQL startup, first-run import, and API launch.
+    entrypoint: ["/bin/bash", "/home/nominatim/entrypoint.sh"]
+
+    # ── Environment ───────────────────────────────────────────────────────────
+    environment:
+      # Filename of the .osm.pbf file inside the /data volume.
+      # Change this to match the file you copied into nominatim-data.
+      OSM_FILE: massachusetts-latest.osm.pbf
+
+      # Optional: override the nominatim project directory inside the container.
+      # NOMINATIM_DIR: /home/nominatim/nominatim-project
+
+    # ── Ports ─────────────────────────────────────────────────────────────────
+    # Format: "host_port:container_port"
+    # Remove or comment out port 5432 if you do not need direct DB access
+    # from outside the container.
+    ports:
+      - "8088:8088"   # Nominatim API
+      - "5432:5432"   # PostgreSQL (optional — remove if not needed externally)
+
+    # ── Volumes ───────────────────────────────────────────────────────────────
+    volumes:
+      # OSM data files (.osm.pbf) — place your .osm.pbf file in the ./data/
+      # folder (next to this docker-compose.yml) before running docker compose up.
+      # This is a bind mount so the file is read directly from the host filesystem.
+      - ./data:/data
+
+      # PostgreSQL database files — persists the imported geocoding database
+      - nominatim-pgdata:/var/lib/pgsql/17/data
+
+      # Nominatim project directory — persists import logs and project config
+      - nominatim-project:/home/nominatim/nominatim-project
+
+      # Mount entrypoint script from the build context into the container
+      # so it can be updated without rebuilding the image
+      - ./entrypoint.sh:/home/nominatim/entrypoint.sh:ro
+
+    # ── Restart policy ────────────────────────────────────────────────────────
+    # "unless-stopped" restarts the container automatically unless you
+    # explicitly stop it. Comment this out on HPC/job-scheduled environments
+    # where the scheduler controls container lifecycle.
+    restart: unless-stopped
+
+    # ── Resource limits (optional) ────────────────────────────────────────────
+    # Uncomment and adjust for HPC environments where you want to cap resource use.
+    # The import step is CPU and memory intensive — allocate generously.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: "4"
+    #       memory: 16G
+    #     reservations:
+    #       memory: 8G
+
+# =============================================================================
+# Named Volumes
+# =============================================================================
+# Docker manages these on the host. Data persists across container restarts
+# and rebuilds. To see where Docker stores them:
+#   docker volume inspect nominatim_nominatim-data
+#
+# To back up the PostgreSQL volume:
+#   docker run --rm -v nominatim_nominatim-pgdata:/data \
+#     -v $(pwd):/backup alpine \
+#     tar czf /backup/pgdata-backup.tar.gz -C /data .
+#
+volumes:
+  nominatim-pgdata:   # PostgreSQL database
+  nominatim-project:  # Nominatim project dir (logs, config)
