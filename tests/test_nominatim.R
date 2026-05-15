@@ -21,12 +21,20 @@ library(dplyr)
 library(readr)
 
 NOMINATIM_URL <- "http://localhost:8088"
-CSV_FILE      <- file.path(dirname(sys.frame(1)$ofile), "sample_addresses.csv")
-OUTPUT_FILE   <- file.path(dirname(sys.frame(1)$ofile), "geocoded_results_r.csv")
 
-# If running interactively, set paths manually:
-# CSV_FILE    <- "sample_addresses.csv"
-# OUTPUT_FILE <- "geocoded_results_r.csv"
+# Resolve the script's directory — works with both Rscript and source()
+.script_dir <- tryCatch({
+  args <- commandArgs(trailingOnly = FALSE)
+  match <- grep("--file=", args)
+  if (length(match) > 0) {
+    dirname(normalizePath(sub("--file=", "", args[match])))
+  } else {
+    dirname(normalizePath(sys.frame(1)$ofile))
+  }
+}, error = function(e) getwd())
+
+CSV_FILE    <- file.path(.script_dir, "sample_addresses.csv")
+OUTPUT_FILE <- file.path(.script_dir, "geocoded_results_r.csv")
 
 cat(sprintf("Nominatim Local Server Tests (R)\nServer: %s\n", NOMINATIM_URL))
 
